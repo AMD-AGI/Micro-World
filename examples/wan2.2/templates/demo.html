@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sprite Causal Action Streaming Demo</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 24px; background: #111; color: #eee; }
+    .row { margin-bottom: 12px; display: flex; gap: 12px; align-items: center; }
+    textarea, input { background: #222; color: #eee; border: 1px solid #444; padding: 8px; }
+    textarea { width: 100%; min-height: 90px; }
+    button { padding: 8px 14px; border: 0; border-radius: 4px; cursor: pointer; }
+    .start { background: #2d8f4e; color: white; }
+    .stop { background: #b74646; color: white; }
+    .replay { background: #3f6db3; color: white; }
+    .replay:disabled { background: #444; color: #999; cursor: not-allowed; }
+    #viewer { width: 640px; height: 352px; background: #000; object-fit: contain; border: 1px solid #333; }
+    .viewer-wrap { display: flex; gap: 12px; align-items: flex-start; }
+    .keys-panel { width: 180px; background:#1a1a1a; border:1px solid #333; padding:10px; }
+    .keys-title { font-size: 13px; color:#bbb; margin-bottom:8px; }
+    .keys-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 8px; }
+    .key-cell { border:1px solid #444; border-radius:6px; padding:8px 6px; text-align:center; color:#aaa; background:#202020; font-size:13px; }
+    .key-cell.active { color:#fff; background:#2d8f4e; border-color:#2d8f4e; font-weight:600; }
+    .mouse-panel { width: 220px; background:#1a1a1a; border:1px solid #333; padding:10px; }
+    .mouse-box { position: relative; width: 180px; height: 180px; margin: 0 auto 8px auto; border:1px solid #444; background:#202020; }
+    .mouse-center { position:absolute; left:50%; top:50%; width:8px; height:8px; border-radius:50%; background:#555; transform: translate(-50%, -50%); }
+    .mouse-cursor { position:absolute; left:50%; top:50%; width:26px; height:26px; transform: translate(-50%, -50%) rotate(20deg); transform-origin: center center; display:flex; align-items:center; justify-content:center; }
+    .mouse-icon { width: 24px; height: 24px; object-fit: contain; }
+    .mouse-info { font-size:12px; color:#bbb; text-align:center; white-space:pre-line; }
+    #log { background: #1a1a1a; border: 1px solid #333; padding: 10px; min-height: 60px; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h2>MicroWorld Streaming Inference Demo</h2>
+
+  <div class="row">
+    <label for="prompt">Prompt</label>
+  </div>
+  <div class="row">
+    <textarea id="prompt">A first-person view of a desolate, arid landscape featuring a cluster of dilapidated structures under a gloomy, overcast sky. In the center, a modern golden sports car sits parked on gravel, contrasting sharply with the surrounding decay. To the left, a rusted metal shack with a corrugated roof stands beside a skeletal, burnt-out vehicle frame. To the right, a crumbling stucco building with dark, empty window frames completes the settlement. The ground is a mix of loose dirt, scattered stones, and sparse vegetation. Raindrops speckle the foreground, while distant sand dunes fade into the hazy background.</textarea>
+  </div>
+
+  <div class="row">
+    <label>Seed</label>
+    <input id="seed" type="number" value="42" />
+    <label>CFG</label>
+    <input id="guidance" type="number" value="1.0" step="0.1" />
+    <label>Steps</label>
+    <input id="steps" type="number" value="4" min="1" />
+    <label>FPS</label>
+    <input id="fps" type="number" value="24" min="1" />
+    <label>Video Length</label>
+    <input id="video_length" type="number" value="401" min="1" />
+  </div>
+  <div class="row">
+    <label>First Frame Path (Optional, fill for i2v)</label>
+    <input id="first_frame_path" type="text" value="asset/sana/game_style_001.png" style="min-width:640px;" placeholder="e.g. asset/street_night.jpg; leave empty for t2v" />
+  </div>
+  <div class="row">
+    <label>Action List</label>
+  </div>
+  <div class="row">
+    <textarea id="action_list_input">[
+  [12, "1 0 0 0 0 0 0 0.006 -0.015"],
+  [24, "1 0 0 0 0 0 0 0.008 -0.017"],
+  [36, "1 0 0 0 0 0 0 0.01 -0.019"],
+  [48, "1 0 0 0 0 0 0 0.011 -0.022"],
+  [60, "1 0 0 0 0 0 0 0.012 -0.023"],
+  [72, "1 0 0 0 0 0 0 0.013 -0.025"],
+  [84, "1 0 0 0 0 0 0 0.013 -0.026"],
+  [96, "1 0 0 0 0 0 0 0.013 -0.028"],
+  [108, "1 0 0 0 0 0 0 0.013 -0.028"],
+  [120, "1 0 0 0 0 0 0 0.013 -0.029"],
+  [132, "1 0 0 0 0 0 0 0.012 -0.029"],
+  [144, "1 0 0 0 0 0 0 0.011 -0.029"],
+  [156, "1 0 0 0 0 0 0 0.01 -0.029"],
+  [168, "1 0 0 0 0 0 0 0.009 -0.029"],
+  [180, "1 0 0 0 0 0 0 0.007 -0.028"],
+  [192, "1 0 0 0 0 0 0 0.005 -0.027"],
+  [204, "1 0 0 0 0 0 0 0.003 -0.025"],
+  [216, "1 0 0 0 0 0 0 0.001 -0.023"],
+  [228, "1 0 0 0 0 0 0 -0.001 -0.023"],
+  [240, "1 0 0 0 0 0 0 -0.002 -0.022"],
+  [252, "1 0 0 0 0 0 0 -0.003 -0.022"],
+  [264, "1 0 0 0 0 0 0 -0.004 -0.022"],
+  [276, "1 0 0 0 0 0 0 -0.005 -0.022"],
+  [288, "1 0 0 0 0 0 0 -0.006 -0.022"],
+  [300, "1 0 0 0 0 0 0 -0.006 -0.022"],
+  [312, "1 0 0 1 0 0 0 -0.007 -0.022"],
+  [324, "1 0 0 1 0 0 0 -0.007 -0.023"],
+  [336, "1 0 0 1 0 0 0 -0.007 -0.023"],
+  [348, "1 0 0 1 0 0 0 -0.007 -0.024"],
+  [360, "1 0 0 1 0 0 0 -0.007 -0.025"],
+  [372, "1 0 0 1 0 0 0 -0.007 -0.026"],
+  [384, "1 0 0 1 0 0 0 -0.006 -0.028"],
+  [396, "1 0 0 1 0 0 0 -0.006 -0.029"],
+  [400, "1 0 0 1 0 0 0 -0.006 -0.034"],
+  ""
+]</textarea>
+  </div>
+
+  <div class="row">
+    <button class="start" onclick="startGen()">Start</button>
+    <button class="stop" onclick="stopGen()">Stop</button>
+    <button id="replay_btn" class="replay" onclick="replayGen()" disabled>Replay</button>
+  </div>
+
+  <div class="row viewer-wrap">
+    <img id="viewer" alt="stream frame" />
+    <div class="keys-panel">
+      <div class="keys-title">Keyboard State</div>
+      <div id="keys_grid" class="keys-grid"></div>
+    </div>
+    <div class="mouse-panel">
+      <div class="keys-title">Mouse Direction</div>
+      <div class="mouse-box" id="mouse_box">
+        <div class="mouse-center"></div>
+        <div class="mouse-cursor" id="mouse_cursor">
+          <img class="mouse-icon" src="/asset/mouse.png" alt="mouse icon" />
+        </div>
+      </div>
+      <div class="mouse-info" id="mouse_info">dx=0.00\ndy=0.00\nangle=20.0°\npos=(0.0, 0.0)</div>
+    </div>
+  </div>
+  <div class="row">
+    <div id="stats" style="background:#1a1a1a;border:1px solid #333;padding:10px;min-width:640px;">
+      queue: 0 | current playback frame: 0 | realtime FPS: 0.00
+    </div>
+  </div>
+  <div class="row">
+    <div id="log">Waiting for connection...</div>
+  </div>
+
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <script>
+    const socket = io();
+    const logEl = document.getElementById("log");
+    const viewer = document.getElementById("viewer");
+    const statsEl = document.getElementById("stats");
+    const keysGrid = document.getElementById("keys_grid");
+    const actionListInput = document.getElementById("action_list_input");
+    const mouseCursor = document.getElementById("mouse_cursor");
+    const mouseInfo = document.getElementById("mouse_info");
+    const mouseBox = document.getElementById("mouse_box");
+    const replayBtn = document.getElementById("replay_btn");
+    let frameQueue = [];
+    let allFrames = [];
+    let playbackTimer = null;
+    let playbackFps = 24;
+    let renderedFrames = 0;
+    let currentFrameIndex = -1;
+    let displayedFrameCount = 0;
+    let fpsWindow = [];
+    let keyboardLabels = ["W", "S", "A", "D", "Space", "Shift", "Ctrl"];
+    let mouseOffsetX = 0.0;
+    let mouseOffsetY = 0.0;
+    // Match pipeline UI overlay: rotation only calibrates initial cursor heading.
+    const INITIAL_MOUSE_ROTATION_DEG = 20.0;
+    let currentJobId = null;
+    let acceptFrames = true;
+    let generationRunning = false;
+
+    function renderKeyCells() {
+      keysGrid.innerHTML = "";
+      keyboardLabels.forEach((label, idx) => {
+        const cell = document.createElement("div");
+        cell.className = "key-cell";
+        cell.id = `key_${idx}`;
+        cell.textContent = label;
+        keysGrid.appendChild(cell);
+      });
+    }
+
+    function updateKeyState(state) {
+      if (!Array.isArray(state)) return;
+      state.forEach((v, idx) => {
+        const cell = document.getElementById(`key_${idx}`);
+        if (!cell) return;
+        const active = Number(v) > 0.5;
+        cell.classList.toggle("active", active);
+      });
+    }
+
+    function clearKeyState() {
+      keyboardLabels.forEach((_, idx) => {
+        const cell = document.getElementById(`key_${idx}`);
+        if (cell) cell.classList.remove("active");
+      });
+    }
+
+    function updateMouseState(mouseState) {
+      if (!Array.isArray(mouseState) || mouseState.length < 2) return;
+      // Keep the same convention as parse_config in pipeline:
+      // mouse_state = [mouse_y, mouse_x], and positions are cumulative.
+      const mouseY = Number(mouseState[0]) || 0;
+      const mouseX = Number(mouseState[1]) || 0;
+      const boxW = mouseBox.clientWidth || 180;
+      const boxH = mouseBox.clientHeight || 180;
+      const scaleX = boxW / 640.0;
+      const scaleY = 4.0 * scaleX;
+      mouseOffsetX += mouseX * scaleX;
+      mouseOffsetY += mouseY * scaleY;
+
+      const cursorHalfW = 13;
+      const cursorHalfH = 13;
+      const limitX = boxW / 2 - cursorHalfW;
+      const limitY = boxH / 2 - cursorHalfH;
+      mouseOffsetX = Math.max(-limitX, Math.min(limitX, mouseOffsetX));
+      mouseOffsetY = Math.max(-limitY, Math.min(limitY, mouseOffsetY));
+
+      mouseCursor.style.transform = `translate(calc(-50% + ${mouseOffsetX}px), calc(-50% + ${mouseOffsetY}px)) rotate(${INITIAL_MOUSE_ROTATION_DEG.toFixed(1)}deg)`;
+      mouseInfo.textContent = `dx=${mouseX.toFixed(2)}\ndy=${mouseY.toFixed(2)}\nangle=${INITIAL_MOUSE_ROTATION_DEG.toFixed(1)}°\npos=(${mouseOffsetX.toFixed(1)}, ${mouseOffsetY.toFixed(1)})`;
+    }
+
+    function clearMouseState() {
+      mouseOffsetX = 0.0;
+      mouseOffsetY = 0.0;
+      mouseCursor.style.transform = `translate(-50%, -50%) rotate(${INITIAL_MOUSE_ROTATION_DEG.toFixed(1)}deg)`;
+      mouseInfo.textContent = `dx=0.00\ndy=0.00\nangle=${INITIAL_MOUSE_ROTATION_DEG.toFixed(1)}°\npos=(0.0, 0.0)`;
+    }
+
+    function updateStats() {
+      const now = Date.now();
+      fpsWindow = fpsWindow.filter((t) => now - t <= 1000);
+      const realtimeFps = fpsWindow.length;
+      const frameText = currentFrameIndex >= 0 ? currentFrameIndex : 0;
+      statsEl.textContent = `queue: ${frameQueue.length} | current playback frame: ${frameText} | realtime FPS: ${realtimeFps.toFixed(2)}`;
+    }
+
+    function log(msg) {
+      logEl.textContent = `${new Date().toLocaleTimeString()} ${msg}\n` + logEl.textContent;
+    }
+
+    function restartPlaybackTimer() {
+      if (playbackTimer) {
+        clearInterval(playbackTimer);
+      }
+      const intervalMs = Math.max(1, Math.floor(1000 / playbackFps));
+      playbackTimer = setInterval(() => {
+        if (frameQueue.length > 0) {
+          const payload = frameQueue.shift();
+          viewer.src = payload.image;
+          renderedFrames += 1;
+          displayedFrameCount += 1;
+          currentFrameIndex = payload.frame_index ?? displayedFrameCount;
+          fpsWindow.push(Date.now());
+          updateKeyState(payload.keyboard_state);
+          updateMouseState(payload.mouse_state);
+        }
+        updateStats();
+      }, intervalMs);
+    }
+
+    socket.on("connect", () => log("socket connected"));
+    socket.on("status", (data) => log(`status: ${JSON.stringify(data)}`));
+    socket.on("generation_meta", (data) => {
+      currentJobId = data.job_id || null;
+      generationRunning = true;
+      replayBtn.disabled = true;
+      if (Array.isArray(data.keyboard_labels) && data.keyboard_labels.length > 0) {
+        keyboardLabels = data.keyboard_labels;
+        renderKeyCells();
+      }
+      playbackFps = data.fps || playbackFps;
+      restartPlaybackTimer();
+      log(`meta: mode=${data.mode}, requested ${data.requested_video_length} frames, aligned ${data.aligned_video_length} frames, expected stream latent frames ${data.expected_stream_latent_frames}, fps=${data.fps}, first_frame=${data.first_frame_path || "None"}`);
+    });
+    socket.on("progress", (data) => log(`progress: ${data.progress}% | ${data.message}`));
+    socket.on("error", (data) => log(`error: ${JSON.stringify(data)}`));
+    socket.on("generation_complete", (data) => {
+      if (currentJobId && data.job_id && data.job_id !== currentJobId) return;
+      generationRunning = false;
+      replayBtn.disabled = allFrames.length === 0;
+      log(`done: ${JSON.stringify(data)}, displayed ${renderedFrames} frames`);
+    });
+
+    socket.on("frame_ready", (payload) => {
+      // payload.image is a base64 data URL of frames after backend decode_latents
+      if (!acceptFrames) return;
+      if (currentJobId && payload.job_id && payload.job_id !== currentJobId) {
+        return;
+      }
+      frameQueue.push(payload);
+      allFrames.push(payload);
+      updateStats();
+    });
+
+    function startGen() {
+      const prompt = document.getElementById("prompt").value;
+      const seed = parseInt(document.getElementById("seed").value, 10);
+      const guidance = parseFloat(document.getElementById("guidance").value);
+      const steps = parseInt(document.getElementById("steps").value, 10);
+      const fps = parseInt(document.getElementById("fps").value, 10);
+      const videoLength = parseInt(document.getElementById("video_length").value, 10);
+      const firstFramePath = document.getElementById("first_frame_path").value.trim();
+      renderedFrames = 0;
+      displayedFrameCount = 0;
+      currentFrameIndex = -1;
+      fpsWindow = [];
+      frameQueue = [];
+      allFrames = [];
+      currentJobId = null;
+      acceptFrames = true;
+      generationRunning = true;
+      replayBtn.disabled = true;
+      clearKeyState();
+      clearMouseState();
+      playbackFps = fps > 0 ? fps : 24;
+      restartPlaybackTimer();
+      updateStats();
+      socket.emit("start_generation", {
+        prompt,
+        seed,
+        guidance_scale: guidance,
+        num_inference_steps: steps,
+        fps: fps,
+        video_length: videoLength,
+        first_frame_path: firstFramePath,
+        action_list_text: actionListInput.value
+      });
+      log("generation requested");
+    }
+
+    function stopGen() {
+      acceptFrames = false;
+      frameQueue = [];
+      if (playbackTimer) {
+        clearInterval(playbackTimer);
+        playbackTimer = null;
+      }
+      socket.emit("stop_generation");
+      log("stop requested");
+      generationRunning = false;
+      replayBtn.disabled = allFrames.length === 0;
+      clearKeyState();
+      clearMouseState();
+      updateStats();
+    }
+
+    function replayGen() {
+      if (generationRunning || allFrames.length === 0) return;
+      frameQueue = allFrames.map((f) => ({ ...f }));
+      renderedFrames = 0;
+      displayedFrameCount = 0;
+      currentFrameIndex = -1;
+      fpsWindow = [];
+      clearKeyState();
+      clearMouseState();
+      restartPlaybackTimer();
+      updateStats();
+      log(`replay started: ${allFrames.length} frames`);
+    }
+    renderKeyCells();
+    restartPlaybackTimer();
+    updateStats();
+  </script>
+</body>
+</html>

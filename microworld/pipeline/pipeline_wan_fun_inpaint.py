@@ -1,3 +1,4 @@
+# Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved.
 import inspect
 import math
 from dataclasses import dataclass

@@ -244,9 +244,9 @@ class AspectRatioBatchSampler(BatchSampler):
                         video_dir = os.path.join(self.video_folder, f"{videoid}.mp4")
                     cap = cv2.VideoCapture(video_dir)
 
-                    # 获取视频尺寸
-                    width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))   # 浮点数转换为整数
-                    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))  # 浮点数转换为整数
+                    # Read video dimensions
+                    width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))   # cast float to int
+                    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))  # cast float to int
                     
                     ratio = height / width # self.dataset[idx]
                 else:
@@ -355,9 +355,9 @@ class AspectRatioBatchImageVideoSampler(BatchSampler):
                             video_dir = os.path.join(self.train_folder, video_id)
                         cap = cv2.VideoCapture(video_dir)
 
-                        # 获取视频尺寸
-                        width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))   # 浮点数转换为整数
-                        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))  # 浮点数转换为整数
+                        # Read video dimensions
+                        width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))   # cast float to int
+                        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))  # cast float to int
                         
                         ratio = height / width # self.dataset[idx]
                     else:

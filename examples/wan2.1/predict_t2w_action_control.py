@@ -77,7 +77,7 @@ fps                 = 15
 # Use torch.float16 if GPU does not support torch.bfloat16
 weight_dtype            = torch.bfloat16
 
-# prompt              = "一位年轻女性穿着一件粉色的连衣裙，裙子上有白色的装饰和粉色的纽扣。她的头发是紫色的，头上戴着一个红色的大蝴蝶结，显得非常可爱和精致。她还戴着一个红色的领结，整体造型充满了少女感和活力。她的表情温柔，双手轻轻交叉放在身前，姿态优雅。背景是简单的灰色，没有任何多余的装饰，使得人物更加突出。她的妆容清淡自然，突显了她的清新气质。整体画面给人一种甜美、梦幻的感觉，仿佛置身于童话世界中。"
+# prompt              = "A young woman in a pink dress with white trim and pink buttons. She has purple hair with a large red bow, a red neck ribbon, a gentle expression, hands folded in front, and an elegant pose against a plain gray background."
 negative_prompt     = "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走"
 
 # prompt = "Standing in the cherry blossom forest with a gun in first person perspective."

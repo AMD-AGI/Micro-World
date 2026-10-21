@@ -6,11 +6,13 @@ import os
 import json
 import glob
 import random
+import types
 import torch
 import torch.cuda.amp as amp
 import torch.nn as nn
 import torch.nn.functional as F
 from diffusers.configuration_utils import register_to_config
+from ..parallel import usp_attn_forward
 from .wan_transformer3d import WanTransformer3DModel, WanAttentionBlock, sinusoidal_embedding_1d, calculate_freqs_i
 
 class ActionModule(nn.Module):
@@ -247,6 +249,13 @@ class WanActionControlNetModel(WanTransformer3DModel):
             condition_block.disable_gradient_checkpointing()
         print(f"WanActionControlNetModel: Gradient checkpointing disabled.")
 
+    def enable_multi_gpus_inference(self):
+        super().enable_multi_gpus_inference()
+        if hasattr(self, "action_blocks"):
+            for block in self.action_blocks:
+                block.self_attn.forward = types.MethodType(
+                    usp_attn_forward, block.self_attn)
+
     def forward_action(
         self,
         x,
@@ -257,7 +266,16 @@ class WanActionControlNetModel(WanTransformer3DModel):
         # arguments
         new_kwargs = dict(x=x)
         new_kwargs.update(kwargs)
+        new_kwargs.pop("seq_len_padded", None)
         conditions = self.action_preprocess(mouse_actions, keyboard_actions, grid_sizes=kwargs["grid_sizes"])
+        if self.sp_world_size > 1:
+            seq_len = kwargs["seq_len_padded"]
+            if conditions.size(1) < seq_len:
+                conditions = torch.cat(
+                    [conditions, conditions.new_zeros(conditions.size(0), seq_len - conditions.size(1), conditions.size(2))],
+                    dim=1,
+                )
+            conditions = torch.chunk(conditions, self.sp_world_size, dim=1)[self.sp_world_rank]
         # embeddings
         for block in self.action_blocks:
             conditions = block(conditions, **new_kwargs)
@@ -316,12 +334,25 @@ class WanActionControlNetModel(WanTransformer3DModel):
 
         x = x.flatten(-3).transpose(1, 2)
         seq_lens = torch.tensor([x.size(1)] * x.size(0), dtype=torch.long)
+        if self.sp_world_size > 1:
+            seq_len = int(math.ceil(seq_len / self.sp_world_size)) * self.sp_world_size
+        assert seq_lens.max() <= seq_len
+        if self.sp_world_size > 1 and x.size(1) < seq_len:
+            x = torch.cat([x, x.new_zeros(x.size(0), seq_len - x.size(1), x.size(2))], dim=1)
         
         fhw = grid_sizes.tolist()
         f_indice = list(range(fhw[0])) # TODO: framepack indice in batch axis canbe different
         fhw = tuple(fhw + f_indice)  # add f_indices to fhw for cache key
         c = self.dim // self.num_heads // 2
         freqs_fhw = calculate_freqs_i(fhw, c, self.freqs, f_indice)
+        if freqs_fhw.size(0) < seq_len:
+            freqs_fhw = torch.cat(
+                [
+                    freqs_fhw,
+                    freqs_fhw.new_ones(seq_len - freqs_fhw.size(0), *freqs_fhw.shape[1:]),
+                ],
+                dim=0,
+            )
         
         # time embeddings
         with amp.autocast(dtype=torch.float32):
@@ -355,6 +386,13 @@ class WanActionControlNetModel(WanTransformer3DModel):
             context_clip = self.img_emb(clip_fea)  # bs x 257 x dim
             context = torch.concat([context_clip, context], dim=1)
 
+        if self.sp_world_size > 1:
+            x = torch.chunk(x, self.sp_world_size, dim=1)[self.sp_world_rank]
+            freqs_fhw = torch.chunk(freqs_fhw, self.sp_world_size, dim=0)[self.sp_world_rank]
+            if t.dim() != 1:
+                e0 = torch.chunk(e0, self.sp_world_size, dim=1)[self.sp_world_rank]
+                e = torch.chunk(e, self.sp_world_size, dim=1)[self.sp_world_rank]
+
         # arguments
         kwargs = dict(
             e=e0,
@@ -364,10 +402,13 @@ class WanActionControlNetModel(WanTransformer3DModel):
             context=context,
             context_lens=context_lens,
             dtype=dtype,
-            t=t  
+            t=t,
+            seq_len_padded=seq_len,
         )
 
         hints = self.forward_action(x, mouse_actions, keyboard_actions, kwargs)
+        # only forward_action consumes the padded length; the main blocks do not accept it
+        kwargs.pop("seq_len_padded", None)
         kwargs['hints'] = hints
         kwargs['context_scale'] = action_context_scale
 
@@ -412,6 +453,10 @@ class WanActionControlNetModel(WanTransformer3DModel):
 
         # head
         x = self.head(x, e, dtype=dtype)
+
+        if self.sp_world_size > 1:
+            x = self.all_gather(x, dim=1)
+            x = x[:, :seq_lens.max().item()]
 
         # unpatchify
         x = self.unpatchify(x, grid_sizes)

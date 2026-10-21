@@ -25,3 +25,27 @@ gradio>=3.41.2
 diffusers==0.34.0
 transformers>=4.46.2
 comet_ml
+torchvision
+pandas
+scipy
+tqdm
+loguru
+
+# Data preparation (distillation_data/)
+moviepy
+huggingface_hub
+
+# Optional extras. Every import below is guarded, so the default single-GPU
+# training and inference paths work without installing any of them.
+#
+# Multi-GPU sequence-parallel inference (microworld/parallel):
+#   pip install xfuser
+# Faster attention backends, picked up automatically when importable:
+#   see https://github.com/Dao-AILab/flash-attention for the ROCm build
+#   pip install sageattention
+# Experiment logging, enabled with --report_to wandb:
+#   pip install wandb
+# 8-bit Adam and the CAME optimizer, enabled with --use_8bit_adam / --optimizer came:
+#   pip install bitsandbytes came_pytorch
+# The streaming web demo (examples/wan2.2/demo.py):
+#   pip install flask flask-socketio

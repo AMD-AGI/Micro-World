@@ -35,17 +35,45 @@ EXAMPLE_DOC_STRING = """
         ```
 """
 
-def parse_config(mouse_actions, keyboard_actions):
+def parse_config(mouse_actions, keyboard_actions, sample_size=(640, 352), cursor_gain=1.0, cursor_y_sign=1.0, cursor_vis_scale=1.0,
+                 cursor_base_scale=0.4, clamp_cursor_to_frame=False):
     """
     generate key data and mouse data from the configuration
     - actions: input configuration
+    - cursor_base_scale: visualization-only base multiplier on the drawn cursor
+      displacement, scaled by the frame width relative to the 640px reference. 0.4 is
+      the 1.0 default; the 2.0 rollout pipelines use 1.0 for a more legible cursor.
+    - clamp_cursor_to_frame: visualization-only. When True the cumulative cursor
+      position is clamped to stay inside the frame with a small margin, so long
+      rollouts cannot walk the cursor off screen. Off by default (1.0 behaviour).
+    - cursor_gain: visualization-only multiplier on the drawn cursor displacement.
+      It does NOT affect the model; it only makes small mouse deltas visible in the UI
+      overlay (e.g. DL3DV-scale inputs ~0.15/frame would otherwise move ~0.15 px/frame).
+    - cursor_y_sign: visualization-only sign for the vertical (pitch / mouse_y) cursor
+      motion. DL3DV pitch sign is opposite to the UI's assumed convention, so its
+      overlay needs cursor_y_sign=-1 to make the cursor up/down match the actual tilt.
+      Does NOT affect the model.
+    - cursor_vis_scale: visualization-only multiplier applied to the mouse deltas before
+      drawing. Use it to DECOUPLE the overlay amplitude from the model's actual mouse
+      magnitude (mouse_mag / mouse_scale): the caller normalizes so the cursor always
+      renders at a fixed reference scale (e.g. as if mouse_mag=0.05), no matter how
+      large the real input is. Does NOT affect the model.
     - return: key_data and mouse_data
+
+    The drawn cursor is a cumulative position. After the cursor_vis_scale normalization,
+    clamp_cursor_to_frame optionally keeps that cumulative position inside the frame as a
+    final safety net. Both are visualization-only.
     """
     mouse_actions = mouse_actions[0]
     keyboard_actions = keyboard_actions[0]
     key_data = {}
     mouse_data = {}
 
+    # Keep the cursor on-screen with a small margin so it never blows up.
+    margin_x = 0.06 * sample_size[0]
+    margin_y = 0.06 * sample_size[1]
+    x_min, x_max = margin_x, sample_size[0] - margin_x
+    y_min, y_max = margin_y, sample_size[1] - margin_y
 
     # iterate over each segment of the configuration
     for i in range(len(mouse_actions)):
@@ -63,15 +91,17 @@ def parse_config(mouse_actions, keyboard_actions):
         }
         # mouse position
         if i == 0:
-            mouse_data[i] = (320, 176)  # default initial position
+            mouse_data[i] = (sample_size[0] // 2, sample_size[1] // 2)  # default initial position
         else:
-            global_scale_factor = 0.4
-            mouse_scale_x = global_scale_factor
-            mouse_scale_y = 4 * global_scale_factor
-            mouse_data[i] = (
-                mouse_data[i-1][0] + mouse_x * mouse_scale_x,  # x coordinate cumulative
-                mouse_data[i-1][1] + mouse_y * mouse_scale_y,  # y coordinate cumulative
-            )
+            global_scale_factor = cursor_base_scale * (sample_size[0] / 640)
+            mouse_scale_x = global_scale_factor * cursor_gain * cursor_vis_scale
+            mouse_scale_y = 4 * global_scale_factor * cursor_gain * cursor_y_sign * cursor_vis_scale
+            next_x = mouse_data[i-1][0] + mouse_x * mouse_scale_x  # x coordinate cumulative
+            next_y = mouse_data[i-1][1] + mouse_y * mouse_scale_y  # y coordinate cumulative
+            if clamp_cursor_to_frame:
+                next_x = min(max(next_x, x_min), x_max)
+                next_y = min(max(next_y, y_min), y_max)
+            mouse_data[i] = (next_x, next_y)
 
     return key_data, mouse_data
 
@@ -157,18 +187,26 @@ def overlay_icon(frame, icon, position, scale=1.0, rotation=0):
 
     # extract icon region
     icon_region = icon_rotated[icon_y_start:icon_y_end, icon_x_start:icon_x_end]
-    alpha = icon_region[:, :, 3:4] / 255.0
-    icon_rgb = icon_region[:, :, :3]
-
     # extract frame region
     frame_region = frame[top_left_y:bottom_right_y, top_left_x:bottom_right_x]
 
+    # The icon can extend past the frame edge (especially at low resolution where
+    # the scaled icon is nearly as tall as the frame). NumPy slicing past array
+    # bounds silently returns a smaller region, leaving icon/frame regions with
+    # mismatched shapes. Clip both to their common overlap and skip if empty.
+    h_ov = min(icon_region.shape[0], frame_region.shape[0])
+    w_ov = min(icon_region.shape[1], frame_region.shape[1])
+    if h_ov <= 0 or w_ov <= 0:
+        return
+    icon_region = icon_region[:h_ov, :w_ov]
+    frame_region = frame_region[:h_ov, :w_ov]
+
+    alpha = icon_region[:, :, 3:4] / 255.0
+    icon_rgb = icon_region[:, :, :3]
+
     # overlay icon
-    # print(frame_region.shape, icon_rgb.shape)
-    frame_region = (1 - alpha) * frame_region + alpha * icon_rgb
-    # replace frame region
-    
-    frame[top_left_y:bottom_right_y, top_left_x:bottom_right_x] = frame_region   
+    blended = (1 - alpha) * frame_region + alpha * icon_rgb
+    frame[top_left_y:top_left_y + h_ov, top_left_x:top_left_x + w_ov] = blended
 
 
 # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.retrieve_timesteps
@@ -754,6 +792,11 @@ class WanActionT2WPipeline(DiffusionPipeline):
         self.maybe_free_model_hooks()
 
         if not return_dict:
-            video = torch.from_numpy(video)[None]
+            # decode_latents can hand back either a numpy array or, for the causal VAE
+            # path, a tensor that is already on device.
+            if isinstance(video, np.ndarray):
+                video = torch.from_numpy(video)[None]
+            elif isinstance(video, torch.Tensor):
+                video = video[None]
 
         return WanPipelineOutput(videos=video)

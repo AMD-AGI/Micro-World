@@ -1,3 +1,4 @@
+# Modifications Copyright(C) [Year of 2025] Advanced Micro Devices, Inc. All rights reserved.
 # Modified from https://github.com/Wan-Video/Wan2.1/blob/main/wan/modules/t5.py
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 import math

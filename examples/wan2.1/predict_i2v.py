@@ -99,7 +99,7 @@ validation_image_start  = "asset/cliff.jpg"
 
 prompt = "Running along a cliffside path in a tropical island in first person perspective, with turquoise waters crashing against the rocks far below, the salty scent of the ocean carried by the breeze, and the sound of distant waves blending with the calls of seagulls as the path twists and turns along the jagged cliffs."
 # prompt = "A cozy living room with sunlight streaming through window, vintage furniture, soft shadows. Viewing in first person perspective, the camera is moving following the player's movement."
-# prompt              = "一只棕色的狗摇着头，坐在舒适房间里的浅色沙发上。在狗的后面，架子上有一幅镶框的画，周围是粉红色的花朵。房间里柔和温暖的灯光营造出舒适的氛围。"
+# prompt              = "A brown dog shakes its head while sitting on a light sofa in a cozy room. Behind the dog, a framed picture on a shelf is surrounded by pink flowers. Soft warm lighting fills the room."
 negative_prompt     = "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走"
 guidance_scale      = 6.0
 seed                = 43

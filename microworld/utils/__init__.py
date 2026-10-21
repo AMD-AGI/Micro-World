@@ -1,3 +1,4 @@
+# Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved.
 from .fm_solvers import FlowDPMSolverMultistepScheduler
 from .fm_solvers_unipc import FlowUniPCMultistepScheduler
 from .lora_utils import merge_lora, unmerge_lora

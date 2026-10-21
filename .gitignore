@@ -7,6 +7,28 @@ samples*
 bmk
 wandb
 datasets*
+
+# Checkpoints and model weights
+ckpts/
+ckpt/
+**/checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+
+# Generated media
+*.mp4
+*.avi
+*.mov
+*.webm
+*.gif
+
+# Logs and crash dumps
+*.log
+gpucore.*
+
 # asset*
 # _*
 logs*

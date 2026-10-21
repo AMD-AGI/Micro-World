@@ -1,3 +1,4 @@
+# Modifications Copyright(C) [Year of 2025] Advanced Micro Devices, Inc. All rights reserved.
 # Modified from https://github.com/Wan-Video/Wan2.1/blob/main/wan/modules/model.py
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 
@@ -5,6 +6,7 @@ import glob
 import json
 import math
 import os
+import types
 import warnings
 from typing import Any, Dict, Optional, Union
 
@@ -17,8 +19,12 @@ from diffusers.loaders.single_file_model import FromOriginalModelMixin
 from diffusers.models.modeling_utils import ModelMixin
 from torch import nn
 
+from ..parallel import (get_sequence_parallel_rank,
+                        get_sequence_parallel_world_size, get_sp_group,
+                        usp_attn_forward)
 from ..utils import cfg_skip
 from .cache_utils import TeaCache
+from . import fused_ops
 
 try:
     import flash_attn_interface
@@ -31,6 +37,26 @@ try:
     FLASH_ATTN_2_AVAILABLE = True
 except ModuleNotFoundError:
     FLASH_ATTN_2_AVAILABLE = False
+
+# AITER (AMD's ROCm operator library, `pip install amd-aiter`) ships an
+# flash_attn_varlen_func with the same signature as flash_attn's, but backed by
+# AMD's own FMHA kernels instead of Composable Kernel. On MI350X/gfx950 it is
+# ~2.5x faster than the CK path at this model's shapes. Opt-in because it is
+# not bit-identical to CK (both agree with SDPA to within bf16 rounding).
+AITER_ATTENTION = os.environ.get("WAN_ATTN_AITER", "0").strip() == "1"
+if AITER_ATTENTION:
+    try:
+        import aiter
+    except ImportError as _exc:
+        warnings.warn(
+            f"[wan] WAN_ATTN_AITER=1 but aiter is not importable ({_exc!r}); "
+            f"falling back to the default flash_attn backend.")
+        AITER_ATTENTION = False
+print(
+    f"[wan] attention varlen backend = "
+    f"{'aiter' if AITER_ATTENTION else 'flash_attn (CK)'}. "
+    f"Set WAN_ATTN_AITER=1 to use AITER's FMHA kernels (requires amd-aiter)."
+)
 
 try:
     major, minor = torch.cuda.get_device_capability(0)
@@ -95,9 +121,11 @@ def flash_attention(
     # preprocess query
     if q_lens is None:
         q = half(q.flatten(0, 1))
-        q_lens = torch.tensor(
-            [lq] * b, dtype=torch.int32).to(
-                device=q.device, non_blocking=True)
+        # Fill directly on-device (GPU-side kernel) instead of building the
+        # tensor on host and copying it over: avoids a hipMemcpyWithStream
+        # HtoD on every single attention() call (this is the dominant path
+        # since callers never pass q_lens explicitly).
+        q_lens = torch.full((b,), lq, dtype=torch.int32, device=q.device)
     else:
         q = half(torch.cat([u[:v] for u, v in zip(q, q_lens)]))
 
@@ -105,9 +133,7 @@ def flash_attention(
     if k_lens is None:
         k = half(k.flatten(0, 1))
         v = half(v.flatten(0, 1))
-        k_lens = torch.tensor(
-            [lk] * b, dtype=torch.int32).to(
-                device=k.device, non_blocking=True)
+        k_lens = torch.full((b,), lk, dtype=torch.int32, device=k.device)
     else:
         k = half(torch.cat([u[:v] for u, v in zip(k, k_lens)]))
         v = half(torch.cat([u[:v] for u, v in zip(v, k_lens)]))
@@ -142,8 +168,10 @@ def flash_attention(
             causal=causal,
             deterministic=deterministic)[0].unflatten(0, (b, lq))
     else:
-        assert FLASH_ATTN_2_AVAILABLE
-        x = flash_attn.flash_attn_varlen_func(
+        assert FLASH_ATTN_2_AVAILABLE or AITER_ATTENTION
+        varlen_func = (aiter.flash_attn_varlen_func if AITER_ATTENTION
+                       else flash_attn.flash_attn_varlen_func)
+        x = varlen_func(
             q=q,
             k=k,
             v=v,
@@ -309,7 +337,10 @@ class WanRMSNorm(nn.Module):
         Args:
             x(Tensor): Shape [B, L, C]
         """
-        return self._norm(x) * self.weight
+        # Fused via fused_ops (see that module for the WAN_RMSNORM_FUSION=
+        # eager|script backend switch; default 'eager' is numerically
+        # identical to the original `self._norm(x) * self.weight`).
+        return fused_ops.rms_norm(x, self.weight, self.eps)
 
     def _norm(self, x):
         return x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.eps).to(x.dtype)
@@ -403,8 +434,9 @@ class WanT2VCrossAttention(WanSelfAttention):
 
         # compute query, key, value
         q = self.norm_q(self.q(x.to(dtype))).view(b, -1, n, d)
-        k = self.norm_k(self.k(context.to(dtype))).view(b, -1, n, d)
-        v = self.v(context.to(dtype)).view(b, -1, n, d)
+        # k/v depend only on the prompt context, so they are served from the
+        # cross-chunk cache when it is enabled (see fused_ops.cross_attn_kv).
+        k, v = fused_ops.cross_attn_kv(self, context, dtype, b, n, d)
 
         # compute attention
         x = attention(
@@ -449,10 +481,9 @@ class WanI2VCrossAttention(WanSelfAttention):
 
         # compute query, key, value
         q = self.norm_q(self.q(x.to(dtype))).view(b, -1, n, d)
-        k = self.norm_k(self.k(context.to(dtype))).view(b, -1, n, d)
-        v = self.v(context.to(dtype)).view(b, -1, n, d)
-        k_img = self.norm_k_img(self.k_img(context_img.to(dtype))).view(b, -1, n, d)
-        v_img = self.v_img(context_img.to(dtype)).view(b, -1, n, d)
+        k, v = fused_ops.cross_attn_kv(self, context, dtype, b, n, d)
+        k_img, v_img = fused_ops.cross_attn_kv(
+            self, context_img, dtype, b, n, d, "k_img", "v_img", "norm_k_img")
 
         img_x = attention(
             q.to(dtype), 
@@ -783,6 +814,9 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         self.current_steps = 0
         self.num_inference_steps = None
         self.gradient_checkpointing = False
+        self.all_gather = None
+        self.sp_world_size = 1
+        self.sp_world_rank = 0
 
     def enable_gradient_checkpointing(self):
         self.gradient_checkpointing = True
@@ -830,6 +864,14 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         self.current_steps = 0
         self.num_inference_steps = None
 
+    def enable_multi_gpus_inference(self):
+        self.sp_world_size = get_sequence_parallel_world_size()
+        self.sp_world_rank = get_sequence_parallel_rank()
+        self.all_gather = get_sp_group().all_gather
+
+        for block in self.blocks:
+            block.self_attn.forward = types.MethodType(
+                usp_attn_forward, block.self_attn)
 
     @cfg_skip()
     def forward(
@@ -882,13 +924,31 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
 
         x = x.flatten(-3).transpose(1, 2)
 
-        seq_lens = torch.tensor([x.size(1)] * x.size(0), dtype=torch.long)
+        # Build on-device to avoid a HtoD memcpy per forward. Every sample in
+        # the batch has the same length, so the bound below is checked against
+        # the Python scalar rather than seq_lens.max(), which would force a
+        # device-to-host sync.
+        seq_lens = torch.tensor(
+            [x.size(1)] * x.size(0), dtype=torch.long, device=x.device)
+        if self.sp_world_size > 1:
+            seq_len = int(math.ceil(seq_len / self.sp_world_size)) * self.sp_world_size
+        assert x.size(1) <= seq_len
+        if self.sp_world_size > 1 and x.size(1) < seq_len:
+            x = torch.cat([x, x.new_zeros(x.size(0), seq_len - x.size(1), x.size(2))], dim=1)
         
         fhw = grid_sizes.tolist()
         f_indice = list(range(fhw[0])) # TODO: framepack indice in batch axis canbe different
         fhw = tuple(fhw + f_indice)  # add f_indices to fhw for cache key
         c = self.dim // self.num_heads // 2
         freqs_fhw = calculate_freqs_i(fhw, c, self.freqs, f_indice)
+        if freqs_fhw.size(0) < seq_len:
+            freqs_fhw = torch.cat(
+                [
+                    freqs_fhw,
+                    freqs_fhw.new_ones(seq_len - freqs_fhw.size(0), *freqs_fhw.shape[1:]),
+                ],
+                dim=0,
+            )
 
         # time embeddings
         with amp.autocast(dtype=torch.float32):
@@ -927,6 +987,13 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         if clip_fea is not None:
             context_clip = self.img_emb(clip_fea)  # bs x 257 x dim
             context = torch.concat([context_clip, context], dim=1)
+
+        if self.sp_world_size > 1:
+            x = torch.chunk(x, self.sp_world_size, dim=1)[self.sp_world_rank]
+            freqs_fhw = torch.chunk(freqs_fhw, self.sp_world_size, dim=0)[self.sp_world_rank]
+            if t.dim() != 1:
+                e0 = torch.chunk(e0, self.sp_world_size, dim=1)[self.sp_world_rank]
+                e = torch.chunk(e, self.sp_world_size, dim=1)[self.sp_world_rank]
         
         # TeaCache
         if self.teacache is not None:
@@ -981,6 +1048,10 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
 
         # head
         x = self.head(x, e, dtype=dtype)
+
+        if self.sp_world_size > 1:
+            x = self.all_gather(x, dim=1)
+            x = x[:, :seq_lens.max().item()]
 
         # unpatchify
         x = self.unpatchify(x, grid_sizes)

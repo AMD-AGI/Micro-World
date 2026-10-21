@@ -2,10 +2,6 @@
 # Copyright (c) Alibaba, Inc. and its affiliates.
 # Modifications Copyright(C) [Year of 2025] Advanced Micro Devices, Inc. All rights reserved.
 import math
-import os
-import json
-import glob
-import random
 import torch
 import torch.cuda.amp as amp
 import torch.nn as nn
@@ -15,13 +11,18 @@ from einops import rearrange
 from .wan_transformer3d import WanTransformer3DModel, WanAttentionBlock, sinusoidal_embedding_1d, calculate_freqs_i
 
 class ActionModule(nn.Module):
-    def __init__(self, mouse_dim=2, keyboard_dim=7, action_dim=1536, window_size=3, temporal_ratio=4):
+    def __init__(self, mouse_dim=2, keyboard_dim=7, action_dim=1536, window_size=3, temporal_ratio=4,
+                 max_position_index=None):
         super().__init__()
         self.mouse_dim = mouse_dim
         self.keyboard_dim = keyboard_dim
         self.action_dim = action_dim
         self.window_size = window_size
         self.ratio = temporal_ratio
+        # Upper bound for the keyboard positional encoding index. Rolling out past the
+        # trained horizon otherwise feeds the model positions it has never seen, so causal
+        # models clamp to their training length. None keeps the unbounded 1.0 behaviour.
+        self.max_position_index = max_position_index
 
         # Layers for mouse movement control
         self.mouse_mlp = nn.Sequential(
@@ -49,7 +50,7 @@ class ActionModule(nn.Module):
             nn.Linear(action_dim//2, action_dim)
         )
 
-    def forward(self, mouse_actions, keyboard_actions, grid_sizes):
+    def forward(self, mouse_actions, keyboard_actions, grid_sizes, frame_offset=0):
         """
         Args:
             mouse_actions (Tensor): Shape [B, rn, mouse_dim]
@@ -62,11 +63,15 @@ class ActionModule(nn.Module):
         ## Fisrt process grouped mouse actions
         # Group mouse actions using sliding window
         p0_mouse_actions =  mouse_actions[:, :1].repeat(1, self.ratio*self.window_size,1).reshape(batch_size, -1) # mouse actions in position 0, repeat it.
-        grouped_mouse_actions = [p0_mouse_actions] # for index 0, use p0_mouse_actions as init
-        for i in range(1, t):
+        grouped_mouse_actions = [] # for index 0, use p0_mouse_actions as init
+        for i in range(t):
             #The information in the "0" entry can be ignored as it does not correspond to any frame in the video. Each action entry includes
-            start_idx = max(1, self.ratio*(i-self.window_size)+1)
-            end_idx = i*self.ratio+1
+            global_i = frame_offset + i
+            if global_i == 0:
+                grouped_mouse_actions.append(p0_mouse_actions)
+                continue
+            start_idx = max(1, self.ratio*(global_i-self.window_size)+1)
+            end_idx = global_i*self.ratio+1
             current_windows = mouse_actions[:, start_idx:end_idx]
             # Pad to fixed length
             target_len = int(self.ratio * self.window_size)
@@ -85,15 +90,22 @@ class ActionModule(nn.Module):
 
         # #add the position encoding as mentioned in paper.
         positions = torch.arange(keyboard_embeddings.size(1), device=keyboard_embeddings.device)
+        if self.max_position_index is not None:
+            positions = positions.clamp(max=self.max_position_index)
+
         keyboard_pos_enc = sinusoidal_embedding_1d(keyboard_embeddings.shape[-1], positions)
         keyboard_pos_enc = keyboard_pos_enc.unsqueeze(0).expand(keyboard_embeddings.size(0), -1, -1)
         keyboard_embeddings += keyboard_pos_enc
 
         p0_keyboard_embeddings = keyboard_embeddings[:,:1].repeat(1, self.ratio*self.window_size,1).reshape(batch_size, -1) # keyboard actions in position 0, repeat it.
-        grouped_keyboard_actions = [p0_keyboard_embeddings] # for idx 0, use  p0_keyboard_embeddings as init.
-        for i in range(1, t):
-            start_idx = max(1, int(self.ratio * (i - self.window_size) + 1))
-            end_idx = int(i * self.ratio + 1)
+        grouped_keyboard_actions = [] # for idx 0, use  p0_keyboard_embeddings as init.
+        for i in range(t):
+            global_i = frame_offset + i
+            if global_i == 0:
+                grouped_keyboard_actions.append(p0_keyboard_embeddings)
+                continue
+            start_idx = max(1, int(self.ratio * (global_i - self.window_size) + 1))
+            end_idx = int(global_i * self.ratio + 1)
             current_windows = keyboard_embeddings[:, start_idx:end_idx, :]  # [B, window, C]
             target_len = int(self.ratio * self.window_size)
             
@@ -164,11 +176,13 @@ class WanActionAdaLNModel(WanTransformer3DModel):
                  window_size=(-1, -1),
                  qk_norm=True,
                  cross_attn_norm=True,
-                 eps=1e-6):
+                 eps=1e-6,
+                 max_position_index=84):
         # model_type = "t2v"   # TODO: Hard code for both preview and official versions.
         super().__init__(model_type, patch_size, text_len, in_dim, dim, ffn_dim, freq_dim, text_dim, out_dim,
                          num_heads, num_layers, window_size, qk_norm, cross_attn_norm, eps)
-        self.action_preprocess = ActionModule(mouse_dim=mouse_dim, keyboard_dim=keyboard_dim, action_dim=action_dim, window_size=3, temporal_ratio=4)
+        self.action_preprocess = ActionModule(mouse_dim=mouse_dim, keyboard_dim=keyboard_dim, action_dim=action_dim, window_size=3, temporal_ratio=4,
+                                              max_position_index=max_position_index)
         if model_type == 'i2v':
             cross_attn_type = 'i2v_cross_attn'
         else:
@@ -244,15 +258,35 @@ class WanActionAdaLNModel(WanTransformer3DModel):
 
         x = x.flatten(-3).transpose(1, 2)
         seq_lens = torch.tensor([x.size(1)] * x.size(0), dtype=torch.long)
+        if self.sp_world_size > 1:
+            seq_len = int(math.ceil(seq_len / self.sp_world_size)) * self.sp_world_size
+        assert seq_lens.max() <= seq_len
+        if self.sp_world_size > 1 and x.size(1) < seq_len:
+            x = torch.cat([x, x.new_zeros(x.size(0), seq_len - x.size(1), x.size(2))], dim=1)
         
         fhw = grid_sizes.tolist()
         f_indice = list(range(fhw[0])) # TODO: framepack indice in batch axis canbe different
         fhw = tuple(fhw + f_indice)  # add f_indices to fhw for cache key
         c = self.dim // self.num_heads // 2
         freqs_fhw = calculate_freqs_i(fhw, c, self.freqs, f_indice)
+        if freqs_fhw.size(0) < seq_len:
+            freqs_fhw = torch.cat(
+                [
+                    freqs_fhw,
+                    freqs_fhw.new_ones(seq_len - freqs_fhw.size(0), *freqs_fhw.shape[1:]),
+                ],
+                dim=0,
+            )
         
         # control adaLN
         conditions = self.action_preprocess(mouse_actions, keyboard_actions, grid_sizes=grid_sizes)  # b, t, d
+        if self.sp_world_size > 1:
+            conditions = conditions.unsqueeze(2).repeat(1, 1, grid_sizes[1] * grid_sizes[2], 1).flatten(1, 2)
+            if conditions.size(1) < seq_len:
+                conditions = torch.cat(
+                    [conditions, conditions.new_zeros(conditions.size(0), seq_len - conditions.size(1), conditions.size(2))],
+                    dim=1,
+                )
 
         # time embeddings
         with amp.autocast(dtype=torch.float32):
@@ -275,16 +309,26 @@ class WanActionAdaLNModel(WanTransformer3DModel):
             
         # context
         context_lens = None
-        context = self.text_embedding(
-            torch.stack([
-                torch.cat(
-                    [u, u.new_zeros(self.text_len - u.size(0), u.size(1))])
-                for u in context
-            ]))
+        context = torch.stack([
+            torch.cat(
+                [u, u.new_zeros(self.text_len - u.size(0), u.size(1))])
+            for u in context
+        ])
+        # Keep context dtype aligned with text_embedding weights under mixed precision.
+        context = context.to(dtype=next(self.text_embedding.parameters()).dtype)
+        context = self.text_embedding(context)
 
         if clip_fea is not None:
             context_clip = self.img_emb(clip_fea)  # bs x 257 x dim
             context = torch.concat([context_clip, context], dim=1)
+
+        if self.sp_world_size > 1:
+            x = torch.chunk(x, self.sp_world_size, dim=1)[self.sp_world_rank]
+            freqs_fhw = torch.chunk(freqs_fhw, self.sp_world_size, dim=0)[self.sp_world_rank]
+            conditions = torch.chunk(conditions, self.sp_world_size, dim=1)[self.sp_world_rank]
+            if t.dim() != 1:
+                e0 = torch.chunk(e0, self.sp_world_size, dim=1)[self.sp_world_rank]
+                e = torch.chunk(e, self.sp_world_size, dim=1)[self.sp_world_rank]
 
         # arguments
         kwargs = dict(
@@ -339,6 +383,10 @@ class WanActionAdaLNModel(WanTransformer3DModel):
 
         # head
         x = self.head(x, e, dtype=dtype)
+
+        if self.sp_world_size > 1:
+            x = self.all_gather(x, dim=1)
+            x = x[:, :seq_lens.max().item()]
 
         # unpatchify
         x = self.unpatchify(x, grid_sizes)

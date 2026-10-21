@@ -1,3 +1,4 @@
+# Copyright(C) [2026] Advanced Micro Devices, Inc. All rights reserved.
 export MODEL_NAME="models/Diffusion_Transformer/Wan2.1-T2V-1.3B"
 export DATASET_NAME="datasets"
 export DATASET_META_NAME="datasets/dataset/video_captions_v0.csv"

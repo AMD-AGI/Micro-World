@@ -1,3 +1,4 @@
+# Modifications Copyright(C) [Year of 2025] Advanced Micro Devices, Inc. All rights reserved.
 # Modified from https://github.com/Wan-Video/Wan2.1/blob/main/wan/modules/vae.py
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 from typing import Tuple, Union
@@ -523,7 +524,7 @@ class AutoencoderKLWan_(nn.Module):
         t = x.shape[2]
         iter_ = 1 + (t - 1) // 4
         scale = [item.to(x.device, x.dtype) for item in scale]
-        ## 对encode输入的x，按时间拆分为1、4、4、4....
+        ## Split encode input x along time into 1, 4, 4, 4, ...
         for i in range(iter_):
             self._enc_conv_idx = [0]
             if i == 0:

@@ -1,3 +1,4 @@
+# Modifications Copyright(C)[2026] Advanced Micro Devices, Inc. All rights reserved.
 """Modified from https://github.com/THUDM/CogVideo/blob/3710a612d8760f5cdb1741befeebb65b9e0f2fe0/sat/sgm/modules/diffusionmodules/sigma_sampling.py
 """
 import torch
@@ -37,7 +38,6 @@ class DiscreteSampling:
                     (n_samples,), 
                     generator=generator, device=device,
                 )
-            print('proc[%d] idx=%s' % (self.rank, idx))
         else:   
             idx = torch.randint(
                     0, self.num_idx, (n_samples,), 
