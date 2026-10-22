@@ -2,7 +2,8 @@
   <br>
   <br>
   <h1>AMD Micro-World: action-controlled Interactive world model</h1>
-<a href='https://rocm.blogs.amd.com/artificial-intelligence/micro-world/README.html'><img src='https://img.shields.io/badge/Technical-Blog-red'></a> 
+<a href='https://rocm.blogs.amd.com/artificial-intelligence/Micro-World-V2/README.html'><img src='https://img.shields.io/badge/2.0%20Technical-Blog-red'></a> 
+<a href='https://rocm.blogs.amd.com/artificial-intelligence/micro-world/README.html'><img src='https://img.shields.io/badge/1.0%20Technical-Blog-red'></a> 
 <a href='https://huggingface.co/amd/Micro-World-2'><img src='https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-2.0 Model-blue'></a>
 <a href='https://huggingface.co/amd/Micro-World-T2W'><img src='https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-1.0%20T2W Model-blue'></a>
 <a href='https://huggingface.co/amd/Micro-World-I2W'><img src='https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-1.0%20I2W Model-blue'></a>
